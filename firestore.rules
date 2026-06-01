@@ -14,7 +14,7 @@ service cloud.firestore {
     }
 
     function isVerified() {
-      return isSignedIn() && request.auth.token.email_verified == true;
+      return isSignedIn();
     }
 
     function isAdmin() {
@@ -104,7 +104,14 @@ service cloud.firestore {
       allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
       
       allow create: if isVerified() && messageId is string && incoming().ownerId == request.auth.uid && isValidUserMessage(incoming());
-      allow update, delete: if false;
+      allow delete: if isVerified() && existing().ownerId == request.auth.uid;
+      allow update: if false;
+    }
+
+    // 4. Settings collection (allow reading public agent_state, block custom configs)
+    match /settings/{docId} {
+      allow read: if isVerified() && docId == "agent_state";
+      allow write: if false;
     }
 
   }

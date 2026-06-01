@@ -2,7 +2,7 @@
 
 Tento podprojekt reprezentuje kompletní, modulární a produkčně připravený systém autonomního plánovacího AI agenta běžícího na **Cloudflare Workers**. 
 
-Agent funguje plně dlouhodobě: má vlastní paměť, hierarchický seznam úkolů, strategické cíle a logování historie. Pravidelně se probouzí pomocí **Cloudflare Cron Triggers** (každých 5 minut), vyhodnocuje časový harmonogram, provádí hloubkovou analýzu trhu/situace s **Google Gemini**, aktualizuje databázi **Firebase Firestore** a posílá strukturované rich-embed reporty na **Discord Webhook**.
+Agent funguje plně dlouhodobě: má vlastní paměť, hierarchický seznam úkolů, strategické cíle a logování historie. Pravidelně se probouzí pomocí **Cloudflare Cron Triggers** (každých 5 minut), vyhodnocuje časový harmonogram, provádí hloubkovou analýzu trhu/situace s **Google Gemini**, aktualizuje databázi **Firebase Firestore** a posílá strukturované reporty na **Discord Webhook** a/nebo **Telegram Kanál/Chat**.
 
 ---
 
@@ -75,11 +75,15 @@ Následující citlivé klíče nesmí ležet v textovém souboru `wrangler.toml
 # Vložení klíče Google Gemini API
 npx wrangler secret put GEMINI_API_KEY
 
-# Vložení Webhook URL adresy z Discord kanálu pro zasílání reportů
+# [Nepovinné] Odesílání zpráv na Telegram:
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put TELEGRAM_CHAT_ID
+
+# [Nepovinné] Odesílání zpráv na Discord:
 npx wrangler secret put DISCORD_WEBHOOK_URL
 
 # Vložení kompletního JSON textu staženého GCP Service Account klíče
-# (Jakmile wrangler vyzve, vložte celý obsah JSON souboru z kroku 4 výše)
+# (Jakmile wrangler vyzve, vložte celý obsah JSON souboru v jednom řádku nebo jako block)
 npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_JSON
 ```
 

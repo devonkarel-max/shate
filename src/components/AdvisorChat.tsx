@@ -120,8 +120,7 @@ export function AdvisorChat({ selectedTopic, setSelectedTopic, resetTrigger, cha
       // Secure "Query Enforcer" - must match the exact security rule filter 'ownerId == uid'
       const q = query(
         collection(db, path),
-        where("ownerId", "==", user.uid),
-        orderBy("createdAt", "asc")
+        where("ownerId", "==", user.uid)
       );
 
       const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -136,6 +135,14 @@ export function AdvisorChat({ selectedTopic, setSelectedTopic, resetTrigger, cha
             ownerId: d.ownerId,
           });
         });
+        
+        // Sort in-memory to prevent missing Firestore index errors
+        loaded.sort((a, b) => {
+          const timeA = a.createdAt || "";
+          const timeB = b.createdAt || "";
+          return timeA.localeCompare(timeB);
+        });
+
         setMessages(loaded);
       }, (error) => {
         handleFirestoreError(error, OperationType.LIST, path);
@@ -223,13 +230,20 @@ export function AdvisorChat({ selectedTopic, setSelectedTopic, resetTrigger, cha
       });
 
       let responseData: any = null;
+      let textResponse = "";
       try {
-        responseData = await response.json();
-      } catch (jsonErr) {
+        textResponse = await response.text();
+        if (textResponse.trim().startsWith("<")) {
+          // It's an HTML response from Nginx/platform - usually happens on 403 / 500 blocked proxies
+          throw new Error("Ahoj! Zeptat se bota se nepodařilo, protože váš Google AI Studio projekt nemá přístup k Gemini API (Permission Denied/403). Ujistěte se prosím, že máte platný Gemini API klíč v postranním menu v sekci Settings > Secrets.");
+        }
+        responseData = JSON.parse(textResponse);
+      } catch (jsonErr: any) {
         console.error("Failed to parse response JSON", jsonErr);
+        throw new Error(jsonErr.message || "Nepodařilo se dekódovat odpověď ze serveru.");
       }
 
-      if (!response.ok) {
+      if (!response.ok || responseData?.success === false) {
         const errorMsg = responseData?.error || "Při komunikaci s AI nastala chyba.";
         throw new Error(errorMsg);
       }

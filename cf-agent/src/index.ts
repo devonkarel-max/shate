@@ -5,6 +5,7 @@ import { MemoryManager } from "./services/memory";
 import { PlanningEngine } from "./services/planner";
 import { AgentScheduler } from "./services/scheduler";
 import { DiscordServiceClient } from "./services/discord";
+import { TelegramServiceClient } from "./services/telegram";
 
 /**
  * Executes the entire lifecycle of the autonomous planner run.
@@ -48,10 +49,23 @@ async function runAutonomousCycle(env: WorkerEnv, isManualTrigger: boolean = fal
     // 5. Send notifications to Discord Webhook
     if (env.DISCORD_WEBHOOK_URL) {
       console.log("Dispatching formatted cycle embed report to Discord webhook...");
-      const discord = new DiscordServiceClient(env.DISCORD_WEBHOOK_URL);
-      await discord.sendReport(output, nextWakeupIso);
-    } else {
-      console.warn("DISCORD_WEBHOOK_URL is missing. Discord output bypassed.");
+      try {
+        const discord = new DiscordServiceClient(env.DISCORD_WEBHOOK_URL);
+        await discord.sendReport(output, nextWakeupIso);
+      } catch (discErr: any) {
+        console.error("Failed sending Discord notification:", discErr.message);
+      }
+    }
+
+    // 6. Send notifications to Telegram Bot
+    if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+      console.log("Dispatching formatted HTML report to Telegram...");
+      try {
+        const telegram = new TelegramServiceClient(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID);
+        await telegram.sendReport(output, nextWakeupIso);
+      } catch (telErr: any) {
+        console.error("Failed sending Telegram notification:", telErr.message);
+      }
     }
 
     console.log("Autonomous agent execution cycle completed successfully!");

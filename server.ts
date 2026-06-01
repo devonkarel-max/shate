@@ -30,15 +30,39 @@ if (admin.apps.length === 0) {
 // Access Firestore database with correct database instance suffix if configured
 const dbAdmin = (admin as any).firestore(admin.app() || undefined, firebaseConfig.firestoreDatabaseId);
 
-// 2. Initialize Google GenAI
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
+// 2. Initialize Google GenAI loader helper (dynamic configuration from database settings)
+async function getGeminiApiKey(): Promise<string> {
+  try {
+    const configRef = dbAdmin.collection("settings").doc("config");
+    const docSnap = await configRef.get();
+    if (docSnap.exists) {
+      const data = docSnap.data();
+      if (data && data.geminiApiKey) {
+        console.log("[GenAI] Požívám vlastní Gemini API klíč z databáze Firestore (settings/config).");
+        return data.geminiApiKey;
+      }
     }
+  } catch (err) {
+    console.warn("[GenAI Warning] Nelze načíst vlastní klíč z databáze:", err);
   }
-});
+  
+  if (process.env.GEMINI_API_KEY) {
+    console.log("[GenAI] Používám záložní Gemini API klíč z proměnných prostředí.");
+  }
+  return process.env.GEMINI_API_KEY || "";
+}
+
+async function getAiClient(): Promise<GoogleGenAI> {
+  const apiKey = await getGeminiApiKey();
+  return new GoogleGenAI({
+    apiKey: apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      }
+    }
+  });
+}
 
 // Helper for error logging and formatting
 function logError(title: string, error: unknown) {
@@ -57,6 +81,40 @@ async function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number, fallbac
   const result = await Promise.race([promise, timeoutPromise]);
   clearTimeout(timeoutId);
   return result;
+}
+
+// Resilient wrapper to handle model permission errors or regional deployment blocks by falling back to standard stable versions
+async function generateContentWithFallback(params: {
+  model: string;
+  contents: any;
+  config?: any;
+}) {
+  const modelsToTry = [
+    params.model,
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-1.5-flash",
+  ];
+
+  const uniqueModels = Array.from(new Set(modelsToTry));
+  let lastError: any = null;
+  const client = await getAiClient();
+
+  for (const modelName of uniqueModels) {
+    try {
+      console.log(`[GenAI] Outputting generation request with model: ${modelName}`);
+      const res = await client.models.generateContent({
+        ...params,
+        model: modelName,
+      });
+      return res;
+    } catch (err: any) {
+      lastError = err;
+      const errStr = err instanceof Error ? err.message : String(err);
+      console.warn(`[GenAI Warning] Failed generation with model ${modelName}:`, errStr);
+    }
+  }
+  throw lastError || new Error("Přihlášení nebo komunikace s Gemini API selhala.");
 }
 
 // Safe Firestore builders to operate within safe limits and prevent blocking Nginx requests
@@ -88,6 +146,96 @@ app.get("/api/health", (req, res) => {
     firebaseProject: firebaseConfig.projectId,
     databaseId: firebaseConfig.firestoreDatabaseId,
   });
+});
+
+/**
+ * POST /api/settings/save-key
+ * Saves the custom Gemini API key to Firestore securely.
+ */
+app.post("/api/settings/save-key", async (req, res) => {
+  try {
+    const { apiKey } = req.body;
+    if (!apiKey) {
+      return res.status(400).json({ success: false, error: "Chybí klíč v těle požadavku" });
+    }
+
+    // Basic format validation for Gemini API key
+    if (typeof apiKey !== "string" || !apiKey.trim().startsWith("AIzaSy")) {
+      return res.status(400).json({ success: false, error: "Neplatný formát Gemini API klíče. Klíč musí začínat 'AIzaSy'." });
+    }
+
+    const configRef = dbAdmin.collection("settings").doc("config");
+    await configRef.set({
+      geminiApiKey: apiKey.trim(),
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+
+    return res.json({ success: true, message: "Vlastní Gemini API klíč byl úspěšně uložen do databáze." });
+  } catch (error) {
+    logError("save-key", error);
+    return res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Chyba při ukládání klíče do databáze."
+    });
+  }
+});
+
+/**
+ * GET /api/settings/status
+ * Checks if a custom Gemini API key is configured (without exposing the key itself).
+ */
+app.get("/api/settings/status", async (req, res) => {
+  try {
+    const configRef = dbAdmin.collection("settings").doc("config");
+    const docSnap = await configRef.get();
+    let isConfigured = false;
+    let updatedAt = null;
+
+    if (docSnap.exists) {
+      const data = docSnap.data();
+      if (data && data.geminiApiKey) {
+        isConfigured = true;
+        updatedAt = data.updatedAt || null;
+      }
+    }
+
+    const hasEnvFallback = !!process.env.GEMINI_API_KEY;
+
+    return res.json({
+      success: true,
+      customKeyConfigured: isConfigured,
+      updatedAt,
+      hasEnvFallback
+    });
+  } catch (error) {
+    logError("settings-status", error);
+    return res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Chyba při načítání stavu nastavení."
+    });
+  }
+});
+
+/**
+ * DELETE /api/settings/delete-key
+ * Deletes the custom Gemini API key from database.
+ */
+app.delete("/api/settings/delete-key", async (req, res) => {
+  try {
+    const configRef = dbAdmin.collection("settings").doc("config");
+    await configRef.set({
+      geminiApiKey: admin.firestore.FieldValue.delete(),
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+
+    return res.json({ success: true, message: "Vlastní API klíč byl úspěšně smazán ze systémové databáze." });
+  } catch (error) {
+    logError("delete-key", error);
+    return res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Chyba při smazání klíče."
+    });
+  }
 });
 
 /**
@@ -178,7 +326,7 @@ Výsledný formát musí být striktně validní JSON s definovanou strukturou. 
     let geminiRes;
     try {
       geminiRes = await runWithTimeout(
-        ai.models.generateContent({
+        generateContentWithFallback({
           model: "gemini-3.5-flash",
           contents: prompt,
           config: {
@@ -242,7 +390,7 @@ Výsledný formát musí být striktně validní JSON s definovanou strukturou. 
         ? "Váš projekt na platformě Google AI Studio nemá povolen přístup k API (Permission Denied). Ujistěte se prosím, že máte platný Gemini API klíč. Lze jej vygenerovat nebo nastavit v postranním menu v sekci nastavení projektu (Settings > Secrets)."
         : `Komunikace s AI selhala: ${errStr}`;
         
-      return res.status(isDenied ? 403 : 500).json({
+      return res.status(200).json({
         success: false,
         error: errMsg
       });
@@ -360,7 +508,7 @@ Nikdy neuvažuj o fiktivních penězích, investičních rozpočtech či financ�
     let geminiRes;
     try {
       geminiRes = await runWithTimeout(
-        ai.models.generateContent({
+        generateContentWithFallback({
           model: apiModel,
           contents: formattedContents,
           config: {
@@ -379,19 +527,21 @@ Nikdy neuvažuj o fiktivních penězích, investičních rozpočtech či financ�
         ? "Ahoj! Zdá se, že váš projekt v Google AI Studio nemá povolen přístup k API (Permission Denied). Ujistěte se prosím, že máte platný Gemini API klíč. Lze jej vygenerovat nebo nastavit v postranním menu v sekci nastavení projektu (Settings > Secrets)."
         : `Chyba při komunikaci s AI: ${errStr}`;
         
-      return res.status(isDenied ? 403 : 500).json({ error: errMsg });
+      return res.status(200).json({ success: false, error: errMsg });
     }
 
     if (!geminiRes) {
-      return res.status(504).json({ error: "Omlouvám se, ale požadavek na AI model vypršel (Timeout)." });
+      return res.status(200).json({ success: false, error: "Omlouvám se, ale požadavek na AI model vypršel (Timeout)." });
     }
 
     return res.json({
+      success: true,
       content: geminiRes.text || "Omlouvám se, ale nepodařilo se mi zformulovat odpověď.",
     });
   } catch (error) {
     logError("chat", error);
-    return res.status(500).json({
+    return res.status(200).json({
+      success: false,
       error: error instanceof Error ? error.message : "Chyba při komunikaci s AI asistentem",
     });
   }

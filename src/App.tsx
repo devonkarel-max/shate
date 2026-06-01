@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { db, auth, googleProvider } from "./firebase";
-import { doc, collection, query, orderBy, onSnapshot, limit, where } from "firebase/firestore";
+import { doc, collection, query, orderBy, onSnapshot, limit, where, deleteDoc } from "firebase/firestore";
 import { User, signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
 import { AdvisorChat } from "./components/AdvisorChat";
 import { CloudflareSetup } from "./components/CloudflareSetup";
@@ -8,7 +8,7 @@ import {
   Sparkles, Clock, AlertCircle, ListTodo, Brain, Target, 
   Menu, Plus, Search, HelpCircle, Settings, LogIn, LogOut,
   MapPin, RefreshCw, ChevronLeft, ChevronRight, CheckCircle2, AlertTriangle, Play,
-  History
+  History, Trash2, X, Key
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -70,6 +70,94 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState<string>("Gemma 4 31B");
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
 
+  // Settings & Custom Gemini API Key states
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [keyStatus, setKeyStatus] = useState<{
+    customKeyConfigured: boolean;
+    updatedAt: string | null;
+    hasEnvFallback: boolean;
+  } | null>(null);
+  const [inputApiKey, setInputApiKey] = useState("");
+  const [saveLoading, setSaveLoading] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const fetchKeyStatus = async () => {
+    try {
+      const response = await fetch("/api/settings/status");
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          setKeyStatus({
+            customKeyConfigured: data.customKeyConfigured,
+            updatedAt: data.updatedAt,
+            hasEnvFallback: data.hasEnvFallback
+          });
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch key status:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchKeyStatus();
+  }, []);
+
+  const handleSaveKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inputApiKey.trim()) return;
+    setSaveLoading(true);
+    setSaveSuccess(null);
+    setSaveError(null);
+
+    try {
+      const res = await fetch("/api/settings/save-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: inputApiKey.trim() })
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        setSaveSuccess("API klíč byl úspěšně uložen do databáze!");
+        setInputApiKey("");
+        fetchKeyStatus();
+      } else {
+        setSaveError(data.error || "Při ukládání klíče došlo k chybě.");
+      }
+    } catch (err: any) {
+      setSaveError(err.message || "Síťová chyba při komunikaci se serverem.");
+    } finally {
+      setSaveLoading(false);
+    }
+  };
+
+  const handleDeleteKey = async () => {
+    if (!confirm("Opravdu chcete smazat vlastní API klíč z databáze?")) return;
+    setSaveLoading(true);
+    setSaveSuccess(null);
+    setSaveError(null);
+
+    try {
+      const res = await fetch("/api/settings/delete-key", {
+        method: "DELETE"
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        setSaveSuccess("Vlastní API klíč byl úspěšně smazán.");
+        fetchKeyStatus();
+      } else {
+        setSaveError(data.error || "Při mazání klíče došlo k chybě.");
+      }
+    } catch (err: any) {
+      setSaveError(err.message || "Síťová chyba při komunikaci se serverem.");
+    } finally {
+      setSaveLoading(false);
+    }
+  };
+
   // Sub to user_messages for Left Sidebar Chat History
   useEffect(() => {
     if (!user) {
@@ -80,8 +168,7 @@ export default function App() {
     try {
       const q = query(
         collection(db, path),
-        where("ownerId", "==", user.uid),
-        orderBy("createdAt", "desc")
+        where("ownerId", "==", user.uid)
       );
       const unsubscribe = onSnapshot(q, (snap) => {
         const loaded: { id: string; content: string; createdAt: string }[] = [];
@@ -102,6 +189,8 @@ export default function App() {
             }
           }
         });
+        // Sort in-memory to avoid compound index requirements in Firestore
+        loaded.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
         setChatHistory(loaded.slice(0, 20)); // Limit to most recent 20 distinct prompts
       }, (error) => {
         console.warn("Could not fetch user messages for sidebar history:", error);
@@ -356,21 +445,41 @@ export default function App() {
                   </div>
                 ) : (
                   chatHistory.map((item) => (
-                    <button
+                    <div
                       key={item.id}
-                      onClick={() => {
-                        setChatInputTrigger({ text: item.content, timestamp: Date.now() });
-                        setSelectedTopic(undefined);
-                        setActiveView("chat");
-                      }}
-                      className="text-left py-2 px-3 hover:bg-[#282a2d] rounded-lg text-[13px] text-zinc-350 hover:text-white truncate transition-colors duration-150 flex items-center gap-2.5 w-full cursor-pointer group"
-                      title={item.content}
+                      className="group relative flex items-center justify-between rounded-lg hover:bg-[#282a2d] text-[13px] text-zinc-350 hover:text-white transition-all duration-150 w-full"
                     >
-                      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 text-[#80868b] group-hover:text-zinc-300 shrink-0">
-                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                      </svg>
-                      <span className="truncate">{item.content}</span>
-                    </button>
+                      <button
+                        onClick={() => {
+                          setChatInputTrigger({ text: item.content, timestamp: Date.now() });
+                          setSelectedTopic(undefined);
+                          setActiveView("chat");
+                        }}
+                        className="text-left py-2 pl-3 pr-8 flex items-center gap-2.5 w-full cursor-pointer truncate"
+                        title={item.content}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 text-[#80868b] group-hover:text-zinc-300 shrink-0">
+                          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>
+                        <span className="truncate">{item.content}</span>
+                      </button>
+                      <button
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          if (confirm("Opravdu chcete smazat tento dotaz z historie chatu?")) {
+                            try {
+                              await deleteDoc(doc(db, "user_messages", item.id));
+                            } catch (err) {
+                              console.error("Failed to delete chat message:", err);
+                            }
+                          }
+                        }}
+                        className="absolute right-2 opacity-0 group-hover:opacity-100 hover:text-red-400 p-1 rounded transition-opacity duration-155 cursor-pointer text-[#80868b] flex items-center justify-center hover:bg-zinc-800"
+                        title="Smazat z historie"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   ))
                 )}
               </div>
@@ -534,7 +643,19 @@ export default function App() {
 
           {/* Right Action Widgets */}
           <div className="flex items-center gap-3.5">
-            {/* Cleaner layout, no unrequested upgrade buttons */}
+            <button
+              onClick={() => {
+                setIsSettingsOpen(true);
+                setSaveSuccess(null);
+                setSaveError(null);
+                fetchKeyStatus();
+              }}
+              className="flex items-center gap-2 text-xs py-1.5 px-3.5 bg-[#1e1f20] hover:bg-zinc-800 rounded-full text-zinc-300 hover:text-white border border-zinc-800 font-sans transition cursor-pointer"
+              title="Nastavení API klíče"
+            >
+              <Settings className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
+              <span>Nastavení</span>
+            </button>
           </div>
         </header>
 
@@ -839,6 +960,174 @@ export default function App() {
         </section>
 
       </main>
+
+      {/* SETTINGS MODAL overlay on main view */}
+      <AnimatePresence>
+        {isSettingsOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            
+            {/* Backdrop slide-in */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsSettingsOpen(false)}
+              className="absolute inset-0 bg-black/60 backdrop-blur-[4px] cursor-pointer"
+            />
+
+            {/* Modal Box */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              transition={{ type: "spring", duration: 0.35 }}
+              className="bg-[#1e1f20] w-full max-w-lg mx-4 rounded-2xl border border-zinc-800 shadow-2xl overflow-hidden relative z-10 flex flex-col"
+            >
+              
+              {/* Header */}
+              <div className="flex items-center justify-between px-6 py-5 border-b border-zinc-900/80 bg-[#171819]">
+                <div className="flex items-center gap-2.5">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
+                    <Key className="h-4.5 w-4.5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-semibold text-white tracking-tight leading-none">Nastavení Shate</h3>
+                    <p className="text-[11px] text-zinc-400 mt-1">Konfigurace vlastního klíče Gemini API</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setIsSettingsOpen(false)}
+                  className="p-1.5 rounded-full hover:bg-zinc-850 text-zinc-400 hover:text-white transition cursor-pointer"
+                  title="Zavřít"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="p-6 flex flex-col gap-5 overflow-y-auto max-h-[80vh] scrollbar-thin">
+                
+                {/* Status Indicator */}
+                <div className="p-4 rounded-xl bg-[#131314] border border-zinc-800/40 flex flex-col gap-3">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 font-mono">
+                    Stav konfigurace rozhraní API
+                  </span>
+                  
+                  {keyStatus ? (
+                    <div className="flex flex-col gap-2.5">
+                      <div className="flex items-center gap-2">
+                        <div className={`h-2 w-2 rounded-full ${keyStatus.customKeyConfigured ? "bg-emerald-500 animate-pulse" : "bg-zinc-500"}`} />
+                        <span className="text-sm font-medium">
+                          {keyStatus.customKeyConfigured 
+                            ? "Vlastní API klíč je aktivní" 
+                            : "Není nastaven žádný vlastní API klíč"
+                          }
+                        </span>
+                      </div>
+                      
+                      {keyStatus.customKeyConfigured && keyStatus.updatedAt && (
+                        <p className="text-[11px] text-zinc-500 font-mono">
+                          Naposledy aktualizováno: {new Date(keyStatus.updatedAt).toLocaleString("cs-CZ")}
+                        </p>
+                      )}
+
+                      {!keyStatus.customKeyConfigured && keyStatus.hasEnvFallback && (
+                        <div className="flex items-start gap-1.5 p-2 bg-indigo-500/5 rounded-lg border border-indigo-500/10 text-[11px] text-indigo-300 leading-normal">
+                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 mt-0.5 text-indigo-400" />
+                          <span>V systému je momentálně aktivní systémový klíč od vývojáře jako záložní řešení.</span>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="h-8 animate-pulse bg-zinc-850 rounded" />
+                  )}
+                </div>
+
+                {/* Form to submit a new API key */}
+                <form onSubmit={handleSaveKey} className="flex flex-col gap-3">
+                  <label className="text-xs font-semibold text-zinc-300" htmlFor="settings-api-key">
+                    Zadejte nový Google Gemini API klíč
+                  </label>
+                  <div className="flex flex-col gap-1.5">
+                    <input
+                      id="settings-api-key"
+                      type="password"
+                      placeholder="AIzaSy..."
+                      value={inputApiKey}
+                      onChange={(e) => setInputApiKey(e.target.value)}
+                      className="w-full bg-[#131314] border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white placeholder-zinc-650 focus:outline-none focus:border-indigo-500 font-mono transition"
+                      disabled={saveLoading}
+                    />
+                    <span className="text-[10px] text-zinc-500 leading-relaxed leading-normal">
+                      Váš API klíč začíná na "AIzaSy" a získáte jej zdarma v konzoli Google AI Studio. Klíč bude bezpečně uložen přímo v databázi vašeho agenta.
+                    </span>
+                  </div>
+
+                  {saveError && (
+                    <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-400 flex items-start gap-2">
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{saveError}</span>
+                    </div>
+                  )}
+
+                  {saveSuccess && (
+                    <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-400 flex items-start gap-2">
+                      <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{saveSuccess}</span>
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-3 mt-2">
+                    <button
+                      type="submit"
+                      disabled={saveLoading || !inputApiKey.trim()}
+                      className="flex-1 py-2.5 px-4 rounded-xl bg-indigo-600 text-white font-semibold text-xs hover:bg-indigo-500 disabled:opacity-50 disabled:hover:bg-indigo-600 cursor-pointer active:scale-98 transition flex items-center justify-center gap-1.5 border border-transparent shadow"
+                    >
+                      {saveLoading ? (
+                        <>
+                          <svg className="animate-spin h-3.5 w-3.5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          <span>Ukládám...</span>
+                        </>
+                      ) : (
+                        <span>Uložit API klíč</span>
+                      )}
+                    </button>
+
+                    {keyStatus?.customKeyConfigured && (
+                      <button
+                        type="button"
+                        onClick={handleDeleteKey}
+                        disabled={saveLoading}
+                        className="p-2.5 rounded-xl border border-zinc-805 bg-zinc-900/40 text-zinc-400 hover:text-rose-400 hover:bg-rose-500/5 hover:border-rose-500/20 cursor-pointer transition active:scale-98"
+                        title="Vymazat vlastní klíč"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    )}
+                  </div>
+                </form>
+
+              </div>
+
+              {/* Footer info lock */}
+              <div className="bg-[#171819] px-6 py-4 border-t border-zinc-900/60 flex items-center gap-2.5 justify-center">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-emerald-400">
+                  <path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22Z" stroke="currentColor" strokeWidth="2" />
+                  <path d="M8 11V9C8 6.79086 9.79086 5 12 5C14.2091 5 16 6.79086 16 9V11" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                  <rect x="7" y="11" width="10" height="8" rx="2" fill="currentColor" />
+                </svg>
+                <span className="text-[10px] text-zinc-400 font-medium font-sans">
+                  Bezpečný server-side proxy přenos. Klíč není nikdy vystaven v prohlížeči.
+                </span>
+              </div>
+
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
     </div>
   );

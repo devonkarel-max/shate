@@ -50,7 +50,11 @@ export interface WorkerEnv {
   // Essential configurations
   FIREBASE_PROJECT_ID: string;
   GEMINI_API_KEY: string;
-  DISCORD_WEBHOOK_URL: string;
+  DISCORD_WEBHOOK_URL?: string;
+  
+  // Telegram notifications Integration
+  TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_CHAT_ID?: string;
   
   // Optional and secure authorization keys
   CRON_SECRET?: string;
