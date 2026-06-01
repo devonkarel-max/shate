@@ -1,13 +1,14 @@
 import { useState, useEffect } from "react";
 import { db, auth, googleProvider } from "./firebase";
-import { doc, collection, query, orderBy, onSnapshot, limit } from "firebase/firestore";
+import { doc, collection, query, orderBy, onSnapshot, limit, where } from "firebase/firestore";
 import { User, signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
 import { AdvisorChat } from "./components/AdvisorChat";
 import { CloudflareSetup } from "./components/CloudflareSetup";
 import { 
   Sparkles, Clock, AlertCircle, ListTodo, Brain, Target, 
   Menu, Plus, Search, HelpCircle, Settings, LogIn, LogOut,
-  MapPin, RefreshCw, ChevronLeft, ChevronRight, CheckCircle2, AlertTriangle, Play
+  MapPin, RefreshCw, ChevronLeft, ChevronRight, CheckCircle2, AlertTriangle, Play,
+  History
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -64,6 +65,52 @@ export default function App() {
   const [loadingState, setLoadingState] = useState(true);
   const [isTriggering, setIsTriggering] = useState(false);
   const [selectedTopic, setSelectedTopic] = useState<string | undefined>(undefined);
+  const [chatHistory, setChatHistory] = useState<{ id: string; content: string; createdAt: string }[]>([]);
+  const [chatInputTrigger, setChatInputTrigger] = useState<{ text: string; timestamp: number } | null>(null);
+  const [selectedModel, setSelectedModel] = useState<string>("Gemma 4 31B");
+  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
+
+  // Sub to user_messages for Left Sidebar Chat History
+  useEffect(() => {
+    if (!user) {
+      setChatHistory([]);
+      return;
+    }
+    const path = "user_messages";
+    try {
+      const q = query(
+        collection(db, path),
+        where("ownerId", "==", user.uid),
+        orderBy("createdAt", "desc")
+      );
+      const unsubscribe = onSnapshot(q, (snap) => {
+        const loaded: { id: string; content: string; createdAt: string }[] = [];
+        const seenContents = new Set<string>();
+        snap.forEach((docSnap) => {
+          const d = docSnap.data();
+          if (d.role === "user") {
+            const rawContent = d.content || "";
+            // strip bracket contexts of strategic modules so history lines look clean
+            const cleanContent = rawContent.replace(/^\[Kontext:\s*[^\]]+\]\s*/, "");
+            if (cleanContent && !seenContents.has(cleanContent)) {
+              seenContents.add(cleanContent);
+              loaded.push({
+                id: docSnap.id,
+                content: cleanContent,
+                createdAt: d.createdAt || "",
+              });
+            }
+          }
+        });
+        setChatHistory(loaded.slice(0, 20)); // Limit to most recent 20 distinct prompts
+      }, (error) => {
+        console.warn("Could not fetch user messages for sidebar history:", error);
+      });
+      return () => unsubscribe();
+    } catch (err) {
+      console.warn("Error subscribing to history:", err);
+    }
+  }, [user]);
 
   // Sub to Auth
   useEffect(() => {
@@ -291,161 +338,55 @@ export default function App() {
             </button>
           </div>
 
-          {/* Navigation Links (Tools list integrated) */}
-          <nav className="flex flex-col gap-1.5 px-1">
-            
-            {/* Active chat link */}
-            <button
-              onClick={() => setActiveView("chat")}
-              className={`flex items-center gap-3.5 py-2.5 rounded-full transition-all duration-200 text-sm cursor-pointer ${
-                activeView === "chat" 
-                  ? "bg-[#2a2b2d] text-white font-medium pl-5 pr-4" 
-                  : "text-zinc-400 hover:bg-[#282a2d] hover:text-white pl-4 pr-3"
-              }`}
-              title="Konverzace"
-            >
-              <Brain className={`h-5 w-5 shrink-0 ${activeView === "chat" ? "text-blue-400" : ""}`} />
-              {sidebarExpanded && <span>Konzultovat s AI</span>}
-            </button>
-
-            {/* Strategic goals link */}
-            <button
-              onClick={() => setActiveView("goals")}
-              className={`flex items-center gap-3.5 py-2.5 rounded-full transition-all duration-200 text-sm cursor-pointer ${
-                activeView === "goals" 
-                  ? "bg-[#2a2b2d] text-white font-medium pl-5 pr-4" 
-                  : "text-zinc-400 hover:bg-[#282a2d] hover:text-white pl-4 pr-3"
-              }`}
-              title="Strategické cíle"
-            >
-              <Target className={`h-5 w-5 shrink-0 ${activeView === "goals" ? "text-indigo-400" : ""}`} />
-              {sidebarExpanded && (
-                <span className="flex items-center justify-between w-full">
-                  <span>Strategické cíle</span>
-                  {goals.length > 0 && (
-                    <span className="text-[10px] font-mono bg-zinc-800 text-zinc-400 px-1.5 py-0.5 rounded-full">
-                      {goals.length}
-                    </span>
-                  )}
-                </span>
-              )}
-            </button>
-
-            {/* Tasks backlog link */}
-            <button
-              onClick={() => setActiveView("tasks")}
-              className={`flex items-center gap-3.5 py-2.5 rounded-full transition-all duration-200 text-sm cursor-pointer ${
-                activeView === "tasks" 
-                  ? "bg-[#2a2b2d] text-white font-medium pl-5 pr-4" 
-                  : "text-zinc-400 hover:bg-[#282a2d] hover:text-white pl-4 pr-3"
-              }`}
-              title="Backlog úkolů"
-            >
-              <ListTodo className={`h-5 w-5 shrink-0 ${activeView === "tasks" ? "text-emerald-400" : ""}`} />
-              {sidebarExpanded && (
-                <span className="flex items-center justify-between w-full">
-                  <span>Backlog úkolů</span>
-                  {tasks.filter(t => t.status === "pending").length > 0 && (
-                    <span className="text-[10px] font-mono bg-emerald-950/40 text-emerald-400 border border-emerald-900/30 px-1.5 py-0.5 rounded-full font-bold">
-                      {tasks.filter(t => t.status === "pending").length}
-                    </span>
-                  )}
-                </span>
-              )}
-            </button>
-
-            {/* Memories link */}
-            <button
-              onClick={() => setActiveView("memories")}
-              className={`flex items-center gap-3.5 py-2.5 rounded-full transition-all duration-200 text-sm cursor-pointer ${
-                activeView === "memories" 
-                  ? "bg-[#2a2b2d] text-white font-medium pl-5 pr-4" 
-                  : "text-zinc-400 hover:bg-[#282a2d] hover:text-white pl-4 pr-3"
-              }`}
-              title="Dlouhodobá paměť"
-            >
-              <Clock className={`h-5 w-5 shrink-0 ${activeView === "memories" ? "text-purple-400" : ""}`} />
-              {sidebarExpanded && <span>Chronologie paměti</span>}
-            </button>
-
-            {/* Reflection / Agent pulse Operational Center link */}
-            <button
-              onClick={() => setActiveView("activity")}
-              className={`flex items-center gap-3.5 py-2.5 rounded-full transition-all duration-200 text-sm cursor-pointer ${
-                activeView === "activity" 
-                  ? "bg-[#2a2b2d] text-white font-medium pl-5 pr-4" 
-                  : "text-zinc-400 hover:bg-[#282a2d] hover:text-white pl-4 pr-3"
-              }`}
-              title="Kognitivní puls"
-            >
-              <RefreshCw className={`h-5 w-5 shrink-0 ${activeView === "activity" ? "text-pink-400" : ""}`} />
-              {sidebarExpanded && (
-                <span className="flex items-center justify-between w-full">
-                  <span>Myšlení Agenta</span>
-                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse border border-zinc-900 shrink-0" />
-                </span>
-              )}
-            </button>
-
-            {/* Deploy configuration instructions link */}
-            <button
-              onClick={() => setActiveView("cloudflare")}
-              className={`flex items-center gap-3.5 py-2.5 rounded-full transition-all duration-200 text-sm cursor-pointer ${
-                activeView === "cloudflare" 
-                  ? "bg-[#2a2b2d] text-white font-medium pl-5 pr-4" 
-                  : "text-zinc-400 hover:bg-[#282a2d] hover:text-white pl-4 pr-3"
-              }`}
-              title="Nasazení na Cloudflare"
-            >
-              <Settings className={`h-5 w-5 shrink-0 ${activeView === "cloudflare" ? "text-orange-400" : ""}`} />
-              {sidebarExpanded && <span>Návod k Nasazení</span>}
-            </button>
-          </nav>
-
-          {/* "Poslední" / "Recent" Section (Clicking targets custom context!) */}
-          {sidebarExpanded && goals.length > 0 && (
-            <div className="flex flex-col gap-2 mt-4 px-3 overflow-hidden select-none">
-              <span className="text-xs font-semibold text-[#c4c7c5] uppercase tracking-wider block font-sans">
-                Poslední Cíle bota
+          {/* Navigation Links and recent chats */}
+          {sidebarExpanded ? (
+            <div className="flex flex-col gap-2.5 mt-2 px-3 overflow-hidden flex-1 select-none">
+              <span className="text-xs font-semibold text-[#c4c7c5] uppercase tracking-wider block font-sans flex items-center gap-1.5">
+                <History className="h-3.5 w-3.5 text-zinc-400 animate-pulse" />
+                Nedávné
               </span>
-              <div className="flex flex-col gap-1 overflow-y-auto max-h-[140px] pr-1 scrollbar-thin scrollbar-thumb-[#202124] scrollbar-track-transparent">
-                {goals.slice(0, 5).map((g) => (
-                  <button
-                    key={g.id}
-                    onClick={() => {
-                      setSelectedTopic(`Cíl: ${g.title}`);
-                      setActiveView("chat");
-                    }}
-                    className="text-left py-2 px-3 hover:bg-[#282a2d] rounded-lg text-[13px] text-zinc-300 hover:text-white truncate transition-colors duration-150 flex items-center gap-2 w-full cursor-pointer"
-                  >
-                    <Target className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
-                    <span className="truncate">{g.title}</span>
-                  </button>
-                ))}
+              <div className="flex flex-col gap-1 overflow-y-auto max-h-[calc(100vh-280px)] pr-1 scrollbar-thin scrollbar-thumb-zinc-805 scrollbar-track-transparent">
+                {!user ? (
+                  <div className="text-xs text-zinc-500 py-3 font-sans leading-relaxed">
+                    Pro ukládání historie chatů se přihlaste přes Google.
+                  </div>
+                ) : chatHistory.length === 0 ? (
+                  <div className="text-xs text-zinc-500 py-3 font-sans leading-relaxed">
+                    Žádné předchozí chaty. Zeptejte se na něco bota nahoře!
+                  </div>
+                ) : (
+                  chatHistory.map((item) => (
+                    <button
+                      key={item.id}
+                      onClick={() => {
+                        setChatInputTrigger({ text: item.content, timestamp: Date.now() });
+                        setSelectedTopic(undefined);
+                        setActiveView("chat");
+                      }}
+                      className="text-left py-2 px-3 hover:bg-[#282a2d] rounded-lg text-[13px] text-zinc-350 hover:text-white truncate transition-colors duration-150 flex items-center gap-2.5 w-full cursor-pointer group"
+                      title={item.content}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 text-[#80868b] group-hover:text-zinc-300 shrink-0">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                      <span className="truncate">{item.content}</span>
+                    </button>
+                  ))
+                )}
               </div>
             </div>
-          )}
-
-          {sidebarExpanded && memories.length > 0 && (
-            <div className="flex flex-col gap-2 mt-2 px-3 overflow-hidden select-none">
-              <span className="text-xs font-semibold text-[#c4c7c5] uppercase tracking-wider block font-sans">
-                Ponaučení z paměti
-              </span>
-              <div className="flex flex-col gap-1 overflow-y-auto max-h-[140px] pr-1 scrollbar-thin scrollbar-thumb-[#202124] scrollbar-track-transparent">
-                {memories.slice(0, 5).map((m) => (
-                  <button
-                    key={m.id}
-                    onClick={() => {
-                      setSelectedTopic(`Vzpomínka: ${m.summary}`);
-                      setActiveView("chat");
-                    }}
-                    className="text-left py-2 px-3 hover:bg-[#282a2d] rounded-lg text-[13px] text-[#c4c7c5] hover:text-white truncate transition-colors duration-150 flex items-center gap-2 w-full cursor-pointer"
-                  >
-                    <Clock className="h-3.5 w-3.5 text-purple-400 shrink-0" />
-                    <span className="truncate">{m.summary}</span>
-                  </button>
-                ))}
-              </div>
+          ) : (
+            <div className="flex flex-col items-center gap-4 mt-2 px-1">
+              <button
+                onClick={() => {
+                  setSidebarExpanded(true);
+                  setActiveView("chat");
+                }}
+                className="p-2.5 rounded-full hover:bg-[#282a2d] text-zinc-405 hover:text-white transition cursor-pointer"
+                title="Zobrazit historii"
+              >
+                <History className="h-5 w-5" />
+              </button>
             </div>
           )}
 
@@ -508,18 +449,6 @@ export default function App() {
             )}
           </div>
 
-          {/* Location Area - Identical to screenshot */}
-          {sidebarExpanded && (
-            <div className="px-3 py-1.5 text-[11px] text-[#80868b] font-sans flex flex-col gap-0.5 leading-normal select-none">
-              <div className="flex items-center gap-1.5 text-zinc-300 font-medium">
-                <MapPin className="h-3.5 w-3.5 text-red-400" />
-                <span>Naaldwijk, Nizozemsko</span>
-              </div>
-              <span className="text-[10px] text-[#80868b] leading-relaxed pl-5">
-                Z vaší IP adresy • <button className="underline hover:text-zinc-300 transition cursor-pointer">Aktualizovat polohu</button>
-              </span>
-            </div>
-          )}
 
         </div>
       </aside>
@@ -552,25 +481,60 @@ export default function App() {
             )}
             
             {/* Active Subview Title Indicator */}
-            <div className="text-xs justify-start select-none py-1 px-3 bg-[#1e1f20] hover:bg-zinc-800/80 rounded-full text-zinc-300 border border-zinc-800 font-sans hidden sm:inline-flex items-center gap-1.5">
-              <span>Model:</span>
-              <span className="text-zinc-100 font-bold">1.5 Flash</span>
-              <span className="text-[#80868b]">▼</span>
+            <div className="relative z-50">
+              <button
+                onClick={() => setIsModelMenuOpen(!isModelMenuOpen)}
+                className="text-xs justify-start select-none py-1 px-3 bg-[#1e1f20] hover:bg-zinc-800/80 rounded-full text-zinc-300 border border-zinc-800 font-sans sm:inline-flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <span>Model:</span>
+                <span className="text-zinc-100 font-bold">{selectedModel}</span>
+                <span className="text-[#c4c7c5] text-[9px]">▼</span>
+              </button>
+
+              {isModelMenuOpen && (
+                <>
+                  <div 
+                    className="fixed inset-0 z-40" 
+                    onClick={() => setIsModelMenuOpen(false)}
+                  />
+                  <div className="absolute left-0 mt-2 w-56 rounded-xl bg-[#1e1f20] border border-zinc-800 p-1.5 shadow-2xl z-50 text-sans">
+                    <div className="px-2.5 py-1.5 text-[9px] uppercase tracking-wider text-zinc-500 font-bold select-none border-b border-zinc-800/50 mb-1">
+                      Vyberte model bota
+                    </div>
+                    {[
+                      "Gemma 4 31B",
+                      "Gemma 4 26B",
+                      "Gemini 3.1 Flash Lite"
+                    ].map((modelName) => (
+                      <button
+                        key={modelName}
+                        onClick={() => {
+                          setSelectedModel(modelName);
+                          setIsModelMenuOpen(false);
+                        }}
+                        className={`w-full text-left py-2 px-2.5 rounded-lg text-xs font-semibold transition flex items-center justify-between cursor-pointer ${
+                          selectedModel === modelName
+                            ? "bg-blue-600/10 text-blue-400"
+                            : "text-zinc-300 hover:bg-zinc-800/80 hover:text-white"
+                        }`}
+                      >
+                        <span>{modelName}</span>
+                        {selectedModel === modelName && (
+                          <svg className="h-4 w-4 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
           </div>
 
           {/* Right Action Widgets */}
           <div className="flex items-center gap-3.5">
-            
-            {/* Upgrade button exact duplicate of "Upgradovat" pill in screenshot */}
-            <button
-              onClick={() => alert("Tato testovací ukázka má již nejvyšší možný model Google Gemini k dispozici zdarma!")}
-              className="group rounded-full bg-gradient-to-r from-blue-700 via-indigo-600 to-indigo-700 hover:from-blue-600 hover:to-indigo-600 text-white font-sans text-[13px] font-semibold py-2.5 px-6 shadow-md transition duration-250 cursor-pointer flex items-center justify-center gap-2 select-none border border-zinc-800"
-            >
-              <Sparkles className="h-4 w-4 text-amber-300 animate-pulse shrink-0" />
-              <span>Upgradovat</span>
-            </button>
-
+            {/* Cleaner layout, no unrequested upgrade buttons */}
           </div>
         </header>
 
@@ -592,6 +556,9 @@ export default function App() {
                   selectedTopic={selectedTopic} 
                   setSelectedTopic={setSelectedTopic}
                   resetTrigger={resetTrigger} 
+                  chatInputTrigger={chatInputTrigger}
+                  onClearChatInputTrigger={() => setChatInputTrigger(null)}
+                  selectedModel={selectedModel}
                 />
               </motion.div>
             )}

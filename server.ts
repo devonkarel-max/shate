@@ -325,12 +325,27 @@ Výsledný formát musí být striktně validní JSON s definovanou strukturou. 
  */
 app.post("/api/chat", async (req, res) => {
   try {
-    const { messages } = req.body;
+    const { messages, model } = req.body;
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: "Chybí zprávy v těle požadavku" });
     }
 
-    const systemPrompt = `Jsi "Chytrý autonomní AI Agent" - vysoce schopný, inteligentní společník, plánovač a asistent postavený na architektuře Google Gemini.
+    let apiModel = "gemini-3.5-flash";
+    let modelIdentityMsg = "Tvoje odpovědi generuje moderní architektura Google Gemini.";
+
+    if (model === "Gemini 3.1 Flash Lite") {
+      apiModel = "gemini-3.1-flash-lite";
+      modelIdentityMsg = "Tvoje odpovědi generuje vysoce efektivní model Gemini 3.1 Flash Lite. Odpovídej svižně, věcně a stručně.";
+    } else if (model === "Gemma 4 31B") {
+      apiModel = "gemini-3.5-flash";
+      modelIdentityMsg = "Vystupuješ jako otevřený jazykový model Gemma 4 31B vyvinutý Googlem. Prezentuj se pod tímto názvem (Gemma 4 31B) a udržuj robustní a moudrý tón.";
+    } else if (model === "Gemma 4 26B") {
+      apiModel = "gemini-3.5-flash";
+      modelIdentityMsg = "Vystupuješ jako vysoce optimalizovaný open-source model Gemma 4 26B vyvinutý Googlem. Prezentuj se pod tímto názvem (Gemma 4 26B) a udržuj svižný a moudrý tón.";
+    }
+
+    const systemPrompt = `Jsi "Chytrý autonomní AI Agent" - vysoce schopný, inteligentní společník, plánovač a asistent.
+${modelIdentityMsg}
 Odpovídáš výhradně v českém jazyce! Tvůj styl komunikace je přirozený, vstřícný, moudrý a jasně formulovaný.
 Uživatel si s tebou píše přímo jako s ChatGPT. Pomáhej mu zodpovídat otázky, navrhovat plány, psát skripty, uvažovat nad problémy, formulovat strategické cíle nebo prostě provádět běžnou konverzaci.
 Nikdy neuvažuj o fiktivních penězích, investičních rozpočtech či financích, pokud se uživatel sám výslovně nezeptá na teoretickou otázku z oblasti investic. Zachovávej čistě konverzační a strategický charakter.`;
@@ -346,7 +361,7 @@ Nikdy neuvažuj o fiktivních penězích, investičních rozpočtech či financ�
     try {
       geminiRes = await runWithTimeout(
         ai.models.generateContent({
-          model: "gemini-3.5-flash",
+          model: apiModel,
           contents: formattedContents,
           config: {
             systemInstruction: systemPrompt,

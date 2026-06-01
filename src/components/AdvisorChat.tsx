@@ -10,6 +10,9 @@ interface AdvisorChatProps {
   selectedTopic: string | undefined;
   setSelectedTopic: (topic: string | undefined) => void;
   resetTrigger?: number;
+  chatInputTrigger?: { text: string; timestamp: number } | null;
+  onClearChatInputTrigger?: () => void;
+  selectedModel?: string;
 }
 
 // Security error-handling infrastructure as mandated by rules
@@ -70,7 +73,7 @@ const PRESETS = [
   }
 ];
 
-export function AdvisorChat({ selectedTopic, setSelectedTopic, resetTrigger }: AdvisorChatProps) {
+export function AdvisorChat({ selectedTopic, setSelectedTopic, resetTrigger, chatInputTrigger, onClearChatInputTrigger, selectedModel = "Gemma 4 31B" }: AdvisorChatProps) {
   const [messages, setMessages] = useState<UserMessage[]>([]);
   const [localMessages, setLocalMessages] = useState<UserMessage[]>([
     {
@@ -86,6 +89,16 @@ export function AdvisorChat({ selectedTopic, setSelectedTopic, resetTrigger }: A
   const [errorAlert, setErrorAlert] = useState<string | null>(null);
   const [user, setUser] = useState(auth.currentUser);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Set input from history select
+  useEffect(() => {
+    if (chatInputTrigger) {
+      setInputText(chatInputTrigger.text);
+      if (onClearChatInputTrigger) {
+        onClearChatInputTrigger();
+      }
+    }
+  }, [chatInputTrigger, onClearChatInputTrigger]);
 
   // Monitor user state
   useEffect(() => {
@@ -203,7 +216,10 @@ export function AdvisorChat({ selectedTopic, setSelectedTopic, resetTrigger }: A
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: bodyMessages }),
+        body: JSON.stringify({ 
+          messages: bodyMessages,
+          model: selectedModel
+        }),
       });
 
       let responseData: any = null;
@@ -269,49 +285,21 @@ export function AdvisorChat({ selectedTopic, setSelectedTopic, resetTrigger }: A
         
         {activeMessages.length <= 1 && !isSending ? (
           /* Empty Chat / Welcome screen identical to Gemini */
-          <div className="max-w-3xl w-full mx-auto flex flex-col justify-center pt-16 md:pt-24">
+          <div className="max-w-3xl w-full mx-auto flex flex-col justify-center pt-32 md:pt-48 pb-10">
             
             {/* Main Welcome gradient headers */}
             <motion.div 
               initial={{ opacity: 0, y: 15 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.5 }}
-              className="mb-12"
+              className="text-center"
             >
-              <h1 className="text-4xl md:text-5xl font-semibold tracking-tight font-sans leading-tight bg-gradient-to-r from-[#4285F4] via-[#9B51E0] via-[#E040FB] to-[#FF7043] bg-clip-text text-transparent">
+              <h1 className="text-5xl md:text-6xl font-semibold tracking-tight font-sans leading-tight bg-gradient-to-r from-[#4285F4] via-[#9B51E0] via-[#E040FB] to-[#FF7043] bg-clip-text text-transparent">
                 Ahoj{greetingName}
               </h1>
-              <h2 className="text-4xl md:text-5xl font-semibold tracking-tight font-sans leading-tight text-[#444746] mt-1">
+              <h2 className="text-4xl md:text-5xl font-semibold tracking-tight font-sans leading-tight text-[#444746] mt-3">
                 V čem vám mohu dnes pomoci?
               </h2>
-            </motion.div>
-
-            {/* Visual Bento prompts */}
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 0.2, duration: 0.5 }}
-              className="grid grid-cols-1 sm:grid-cols-2 gap-4"
-            >
-              {PRESETS.map((p, idx) => {
-                const IconComp = p.icon;
-                return (
-                  <button
-                    onClick={() => handlePresetClick(p.text)}
-                    key={idx}
-                    className="group text-left p-5 rounded-2xl bg-[#1e1f20] hover:bg-[#2a2b2d] border border-transparent transition-all duration-200 flex flex-col justify-between h-40 cursor-pointer shadow-sm relative overflow-hidden"
-                  >
-                    <p className="text-sm font-normal text-zinc-200 leading-relaxed group-hover:text-white transition-colors duration-200">
-                      {p.text}
-                    </p>
-                    <div className="flex justify-end mt-4">
-                      <div className={`p-3 rounded-full bg-[#131314] ${p.iconColor} transition-transform duration-300 group-hover:scale-110`}>
-                        <IconComp className="h-5 w-5" />
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
             </motion.div>
           </div>
         ) : (
@@ -436,14 +424,14 @@ export function AdvisorChat({ selectedTopic, setSelectedTopic, resetTrigger }: A
             <input
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              placeholder="Zeptat se Gemini"
+              placeholder={`Napište zprávu pro ${selectedModel}...`}
               className="flex-1 text-[15px] text-zinc-100 placeholder-[#80868b] bg-transparent outline-none border-none py-2 w-full focus:ring-0 focus:outline-none"
             />
 
             {/* Controls right-aligned inside the pill */}
             <div className="flex items-center gap-4 text-[#c4c7c5] shrink-0 font-sans">
-              <span className="text-xs bg-[#131314] hover:bg-[#2a2b2d] px-3 py-1 rounded-full text-zinc-400 border border-zinc-800 select-none cursor-pointer hidden sm:inline-flex items-center gap-1 font-medium">
-                Flash <span className="text-[10px] opacity-75">▼</span>
+              <span className="text-[11px] bg-[#131314] px-3 py-1.5 rounded-full text-zinc-400 border border-zinc-800 select-none hidden md:inline-flex items-center gap-1 font-semibold">
+                {selectedModel}
               </span>
               <button 
                 type="button"
