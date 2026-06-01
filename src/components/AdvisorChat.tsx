@@ -1,13 +1,15 @@
 import { useState, useEffect, useRef } from "react";
 import { auth, db } from "../firebase";
-import { collection, addDoc, query, where, orderBy, onSnapshot } from "firebase/firestore";
+import { collection, addDoc, query, where, orderBy, onSnapshot, getDocs, deleteDoc } from "firebase/firestore";
 import { UserMessage } from "../types";
-import { Send, Bot, User, AlertTriangle, ShieldCheck } from "lucide-react";
-import { motion } from "motion/react";
+import { Send, ArrowUp, Sparkles, Mic, History, X, Compass, Code, PenTool, LayoutGrid, AlertTriangle, ShieldCheck } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
 import Markdown from "react-markdown";
 
 interface AdvisorChatProps {
   selectedTopic: string | undefined;
+  setSelectedTopic: (topic: string | undefined) => void;
+  resetTrigger?: number;
 }
 
 // Security error-handling infrastructure as mandated by rules
@@ -46,25 +48,42 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
 }
 
 const PRESETS = [
-  "Jaké jsou tvé současné strategické cíle a jak jich hodláš dosáhnout?",
-  "Napiš mi jednoduchý Python skript pro stažení a analýzu dat z libovolného webu.",
-  "Jak si mohu vybudovat ucelenou znalostní bázi a automatizovat běžnou denní rutinu?",
-  "Pomoz mi naplánovat nový projekt a rozdělit ho na jednotlivé podúkoly."
+  {
+    text: "Jaké jsou tvé současné strategické cíle a jak jich hodláš dosáhnout?",
+    icon: Compass,
+    iconColor: "text-blue-400"
+  },
+  {
+    text: "Napiš mi jednoduchý Python skript pro stažení a analýzu dat z libovolného webu.",
+    icon: Code,
+    iconColor: "text-emerald-400"
+  },
+  {
+    text: "Jak si mohu vybudovat ucelenou znalostní bázi a automatizovat běžnou denní rutinu?",
+    icon: PenTool,
+    iconColor: "text-amber-400"
+  },
+  {
+    text: "Pomoz mi naplánovat nový projekt a rozdělit ho na jednotlivé podúkoly.",
+    icon: LayoutGrid,
+    iconColor: "text-purple-400"
+  }
 ];
 
-export function AdvisorChat({ selectedTopic }: AdvisorChatProps) {
+export function AdvisorChat({ selectedTopic, setSelectedTopic, resetTrigger }: AdvisorChatProps) {
   const [messages, setMessages] = useState<UserMessage[]>([]);
   const [localMessages, setLocalMessages] = useState<UserMessage[]>([
     {
       id: "welcome",
       role: "assistant",
-      content: "Ahoj! Jsem tvůj chytrý autonomní AI Agent postavený na modelu Google Gemini. Můžeš se mě zeptat na cokoliv – od strategického plánování po pomoc s programováním, psaním textů či analýzou úkolů.",
+      content: "Ahoj! Jsem tvůj inteligentní společník. Pomohu ti naplánovat strategii, napsat kód, analyzovat cíle nebo odpovědět na jakékoliv zvídavé otázky. Čím začneme?",
       createdAt: new Date().toISOString(),
       ownerId: "system"
     }
   ]);
   const [inputText, setInputText] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [errorAlert, setErrorAlert] = useState<string | null>(null);
   const [user, setUser] = useState(auth.currentUser);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -115,10 +134,26 @@ export function AdvisorChat({ selectedTopic }: AdvisorChatProps) {
     }
   }, [user]);
 
+  // Handle reset trigger
+  useEffect(() => {
+    if (resetTrigger) {
+      setLocalMessages([
+        {
+          id: "welcome",
+          role: "assistant",
+          content: "Spuštěna nová konverzace. Zeptej se mě na cokoliv!",
+          createdAt: new Date().toISOString(),
+          ownerId: "system"
+        }
+      ]);
+      setErrorAlert(null);
+    }
+  }, [resetTrigger]);
+
   // Scroll to bottom
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, localMessages]);
+  }, [messages, localMessages, isSending]);
 
   const activeMessages = user ? messages : localMessages;
 
@@ -126,6 +161,7 @@ export function AdvisorChat({ selectedTopic }: AdvisorChatProps) {
     if (!textToSend.trim() || isSending) return;
     setIsSending(true);
     setInputText("");
+    setErrorAlert(null);
 
     const timestamp = new Date().toISOString();
     const cleanText = selectedTopic 
@@ -170,12 +206,19 @@ export function AdvisorChat({ selectedTopic }: AdvisorChatProps) {
         body: JSON.stringify({ messages: bodyMessages }),
       });
 
-      if (!response.ok) {
-        throw new Error("Tento server neodpověděl včas.");
+      let responseData: any = null;
+      try {
+        responseData = await response.json();
+      } catch (jsonErr) {
+        console.error("Failed to parse response JSON", jsonErr);
       }
 
-      const responseData = await response.json();
-      const aiContent = responseData.content;
+      if (!response.ok) {
+        const errorMsg = responseData?.error || "Při komunikaci s AI nastala chyba.";
+        throw new Error(errorMsg);
+      }
+
+      const aiContent = responseData?.content || "Omlouvám se, nepodařilo se získat odpověď.";
 
       // 3. Save assistant response
       if (user) {
@@ -205,19 +248,8 @@ export function AdvisorChat({ selectedTopic }: AdvisorChatProps) {
 
     } catch (error) {
       console.error(error);
-      const errAlert = "Chyba: Nepodařilo se dokončit analýzu s AI.";
-      if (!user) {
-        setLocalMessages(prev => [
-          ...prev,
-          {
-            id: `err_${Date.now()}`,
-            role: "assistant",
-            content: errAlert,
-            createdAt: new Date().toISOString(),
-            ownerId: "local"
-          }
-        ]);
-      }
+      const errMsg = error instanceof Error ? error.message : "Chyba: Nepodařilo se dokončit požadavek s AI.";
+      setErrorAlert(errMsg);
     } finally {
       setIsSending(false);
     }
@@ -227,120 +259,224 @@ export function AdvisorChat({ selectedTopic }: AdvisorChatProps) {
     sendMessage(preset);
   };
 
-  const currentTopicDisplay = selectedTopic || "Obecná konverzace a strategie";
+  const greetingName = user?.displayName ? `, ${user.displayName.split(" ")[0]}` : "";
 
   return (
-    <div className="rounded-2xl border border-zinc-800 bg-zinc-850 p-6 flex flex-col gap-5 h-[620px] select-none shadow-xl">
+    <div className="flex flex-col flex-1 h-full select-none bg-[#131314] relative">
       
-      {/* 1. Chat Header */}
-      <div className="border-b border-zinc-800 pb-4 flex items-center justify-between">
-        <div>
-          <h2 className="text-sm font-extrabold uppercase tracking-wide text-white">Chytrý AI Agent</h2>
-          <span className="text-[10px] font-mono text-zinc-500">Kontext: {currentTopicDisplay}</span>
-        </div>
-        {user ? (
-          <div className="flex items-center gap-1.5 rounded-full bg-indigo-600/10 border border-indigo-600/20 px-2.5 py-1 text-[10px] text-indigo-400 font-bold font-mono">
-            <ShieldCheck className="h-3.5 w-3.5" /> Uloženo v Cloudu
+      {/* Messages area */}
+      <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 flex flex-col gap-8 scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
+        
+        {activeMessages.length <= 1 && !isSending ? (
+          /* Empty Chat / Welcome screen identical to Gemini */
+          <div className="max-w-3xl w-full mx-auto flex flex-col justify-center pt-16 md:pt-24">
+            
+            {/* Main Welcome gradient headers */}
+            <motion.div 
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.5 }}
+              className="mb-12"
+            >
+              <h1 className="text-4xl md:text-5xl font-semibold tracking-tight font-sans leading-tight bg-gradient-to-r from-[#4285F4] via-[#9B51E0] via-[#E040FB] to-[#FF7043] bg-clip-text text-transparent">
+                Ahoj{greetingName}
+              </h1>
+              <h2 className="text-4xl md:text-5xl font-semibold tracking-tight font-sans leading-tight text-[#444746] mt-1">
+                V čem vám mohu dnes pomoci?
+              </h2>
+            </motion.div>
+
+            {/* Visual Bento prompts */}
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.2, duration: 0.5 }}
+              className="grid grid-cols-1 sm:grid-cols-2 gap-4"
+            >
+              {PRESETS.map((p, idx) => {
+                const IconComp = p.icon;
+                return (
+                  <button
+                    onClick={() => handlePresetClick(p.text)}
+                    key={idx}
+                    className="group text-left p-5 rounded-2xl bg-[#1e1f20] hover:bg-[#2a2b2d] border border-transparent transition-all duration-200 flex flex-col justify-between h-40 cursor-pointer shadow-sm relative overflow-hidden"
+                  >
+                    <p className="text-sm font-normal text-zinc-200 leading-relaxed group-hover:text-white transition-colors duration-200">
+                      {p.text}
+                    </p>
+                    <div className="flex justify-end mt-4">
+                      <div className={`p-3 rounded-full bg-[#131314] ${p.iconColor} transition-transform duration-300 group-hover:scale-110`}>
+                        <IconComp className="h-5 w-5" />
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </motion.div>
           </div>
         ) : (
-          <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 text-[10px] text-amber-500 font-bold font-mono">
-            <AlertTriangle className="h-3.5 w-3.5" /> Demo režim
-          </div>
-        )}
-      </div>
+          /* Dialog Stream */
+          <div className="max-w-3xl w-full mx-auto flex flex-col gap-6 pt-4 pb-20">
+            {activeMessages.map((msg, index) => {
+              const isBot = msg.role === "assistant";
+              return (
+                <div
+                  key={msg.id || index}
+                  className={`flex gap-4 md:gap-6 ${isBot ? "items-start w-full" : "justify-end"}`}
+                >
+                  {isBot && (
+                    <div className="h-9 w-9 rounded-full flex items-center justify-center shrink-0 bg-transparent">
+                      {/* Gradient Sparkle SVG matching Gemini */}
+                      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-6 w-6">
+                        <path d="M12 0C12 6.627 6.627 12 0 12C6.627 12 12 17.373 12 24C12 17.373 17.373 12 24 12C17.373 12 12 6.627 12 0Z" fill="url(#chatGeminiGradient)" />
+                        <defs>
+                          <linearGradient id="chatGeminiGradient" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+                            <stop stopColor="#4285F4" />
+                            <stop offset="0.3" stopColor="#9B51E0" />
+                            <stop offset="0.6" stopColor="#E040FB" />
+                            <stop offset="0.9" stopColor="#FF7043" />
+                          </linearGradient>
+                        </defs>
+                      </svg>
+                    </div>
+                  )}
 
-      {/* 2. Messages area */}
-      <div className="flex-1 overflow-y-auto pr-1 flex flex-col gap-4">
-        {activeMessages.map((msg, index) => {
-          const isBot = msg.role === "assistant";
-          return (
-            <div
-              key={msg.id || index}
-              className={`flex gap-3 max-w-[85%] ${isBot ? "self-start" : "self-end flex-row-reverse"}`}
-            >
-              <div className={`h-8 w-8 rounded flex items-center justify-center border shrink-0 ${
-                isBot 
-                  ? "bg-indigo-600/10 border-indigo-600/30 text-indigo-400" 
-                  : "bg-zinc-800 border-zinc-700 text-zinc-300"
-              }`}>
-                {isBot ? <Bot className="h-4 w-4" /> : <User className="h-4 w-4" />}
-              </div>
-              <div className={`rounded-xl p-4 text-xs leading-relaxed border ${
-                isBot 
-                  ? "bg-zinc-900 border-zinc-800 text-zinc-300" 
-                  : "bg-indigo-600 text-white border-indigo-600/40"
-              }`}>
-                <div className="markdown-body prose prose-invert prose-xs leading-relaxed max-w-none
-                  [&>p]:mb-2 [&>p:last-child]:mb-0
-                  [&>ul]:list-disc [&>ul]:pl-4 [&>ul]:mb-2
-                  [&>ol]:list-decimal [&>ol]:pl-4 [&>ol]:mb-2
-                  [&>strong]:text-white [&>strong]:font-bold
-                  [&>code]:font-mono [&>code]:text-[10px] [&>code]:bg-zinc-950 [&>code]:px-1 [&>code]:py-0.5 [&>code]:rounded [&>code]:text-indigo-300
-                  [&>pre]:bg-zinc-950 [&>pre]:p-3 [&>pre]:rounded-lg [&>pre]:border [&>pre]:border-zinc-800 [&>pre]:my-2 [&>pre_code]:text-zinc-200 [&>pre_code]:text-[11px]
-                ">
-                  <Markdown>{msg.content}</Markdown>
+                  <div className={`text-sm leading-relaxed ${
+                    isBot 
+                      ? "text-[#dfdfdf] flex-1 pt-1 md:text-[15px]" 
+                      : "bg-[#1e1f20] text-zinc-100 rounded-[24px] px-6 py-3.5 max-w-[80%] break-words md:text-[15px]"
+                  }`}>
+                    {isBot ? (
+                      <div className="markdown-body prose prose-invert max-w-none
+                        [&>p]:mb-4 [&>p:last-child]:mb-0 [&>p]:leading-relaxed
+                        [&>ul]:list-disc [&>ul]:pl-5 [&>ul]:mb-4
+                        [&>ol]:list-decimal [&>ol]:pl-5 [&>ol]:mb-4
+                        [&>strong]:text-white [&>strong]:font-semibold
+                        [&>code]:font-mono [&>code]:text-xs [&>code]:bg-[#2a2b2d] [&>code]:px-1.5 [&>code]:py-0.5 [&>code]:rounded [&>code]:text-[#c1c7f4]
+                        [&>pre]:bg-[#0c0d0e] [&>pre]:p-4 [&>pre]:rounded-2xl [&>pre]:border [&>pre]:border-zinc-800 [&>pre]:my-4 [&>pre_code]:text-zinc-200 [&>pre_code]:text-xs [&>pre_code]:bg-transparent [&>pre_code]:p-0
+                      ">
+                        <Markdown>{msg.content}</Markdown>
+                      </div>
+                    ) : (
+                      <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+
+            {isSending && (
+              <div className="flex gap-4 md:gap-6 items-start w-full">
+                <div className="h-9 w-9 rounded-full flex items-center justify-center shrink-0 bg-transparent">
+                  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 animate-pulse">
+                    <path d="M12 0C12 6.627 6.627 12 0 12C6.627 12 12 17.373 12 24C12 17.373 17.373 12 24 12C17.373 12 12 6.627 12 0Z" fill="url(#typingGeminiGradient)" />
+                    <defs>
+                      <linearGradient id="typingGeminiGradient" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+                        <stop stopColor="#4285F4" />
+                        <stop offset="0.3" stopColor="#9B51E0" />
+                        <stop offset="0.6" stopColor="#E040FB" />
+                        <stop offset="0.9" stopColor="#FF7043" />
+                      </linearGradient>
+                    </defs>
+                  </svg>
+                </div>
+                <div className="flex items-center gap-1 mt-3">
+                  <span className="h-2 w-2 rounded-full bg-[#4285F4] animate-bounce [animation-delay:-0.3s]"></span>
+                  <span className="h-2 w-2 rounded-full bg-[#9B51E0] animate-bounce [animation-delay:-0.15s]"></span>
+                  <span className="h-2 w-2 rounded-full bg-[#FF7043] animate-bounce"></span>
                 </div>
               </div>
-            </div>
-          );
-        })}
-        {isSending && (
-          <div className="flex gap-3 self-start max-w-[85%]">
-            <div className="h-8 w-8 rounded flex items-center justify-center border bg-indigo-600/10 border-indigo-600/30 text-indigo-400 shrink-0">
-              <Bot className="h-4 w-4" />
-            </div>
-            <div className="rounded-xl p-4 text-xs bg-zinc-900 border border-zinc-800 text-zinc-400 flex items-center gap-2">
-              <span className="flex h-2 w-2 relative">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-600"></span>
-              </span>
-              Gemini formuluje odpověď...
-            </div>
+            )}
+            <div ref={chatEndRef} />
           </div>
         )}
-        <div ref={chatEndRef} />
       </div>
 
-      {/* 3. Suggestions */}
-      {activeMessages.length <= 1 && (
-        <div className="flex flex-col gap-2">
-          <span className="text-[10px] font-mono font-bold text-zinc-500 uppercase tracking-wider block">Vyberte téma dotazu:</span>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {PRESETS.map((p, idx) => (
-              <button
-                onClick={() => handlePresetClick(p)}
-                key={idx}
-                className="text-left text-[11px] p-2.5 rounded-xl border border-zinc-800 bg-zinc-900/40 hover:bg-zinc-900 hover:border-zinc-700 text-zinc-400 hover:text-zinc-200 transition"
-              >
-                {p}
-              </button>
-            ))}
+      {/* Persistent floating indicator / Context overlay above input */}
+      {selectedTopic && (
+        <div className="w-full max-w-3xl mx-auto px-4 shrink-0 transition-all">
+          <div className="flex items-center justify-between p-3.5 rounded-2xl bg-[#1e1f20] border border-zinc-800/60 mb-2 text-xs">
+            <span className="text-[#a8b3cf] flex items-center gap-2">
+              <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
+              Dotaz v kontextu: <strong className="text-white">{selectedTopic}</strong>
+            </span>
+            <button 
+              onClick={() => setSelectedTopic(undefined)}
+              className="text-[#a8b3cf] hover:text-red-400 p-1 rounded-full hover:bg-zinc-800/50 transition cursor-pointer"
+              title="Zrušit kontext"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
         </div>
       )}
 
-      {/* 4. Input Area */}
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          sendMessage(inputText);
-        }}
-        className="flex items-center gap-2 border-t border-zinc-800 pt-4"
-      >
-        <input
-          value={inputText}
-          onChange={(e) => setInputText(e.target.value)}
-          placeholder="Napište zprávu pro AI Agenta..."
-          className="flex-1 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-xs text-white placeholder-zinc-500 focus:border-indigo-600 focus:outline-none"
-        />
-        <button
-          type="submit"
-          disabled={!inputText.trim() || isSending}
-          className="rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-900 disabled:text-zinc-600 disabled:border-zinc-800 border border-transparent hover:scale-105 active:scale-95 text-white p-3 transition cursor-pointer"
+      {/* Floating error box */}
+      {errorAlert && (
+        <div className="w-full max-w-3xl mx-auto px-4 shrink-0">
+          <div className="p-4 rounded-2xl bg-red-500/10 border border-red-500/20 text-xs text-red-400 flex flex-col gap-1.5 mb-2">
+            <span className="font-bold flex items-center gap-1.5"><AlertTriangle className="h-4.5 w-4.5 text-red-500 shrink-0" /> Chyba:</span>
+            <p className="leading-relaxed">{errorAlert}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Centered Sticky Bottom Input Panel */}
+      <div className="w-full shrink-0 bg-[#131314] pb-6 pt-3 px-4 z-10 border-t border-zinc-900">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            sendMessage(inputText);
+          }}
+          className="max-w-3xl w-full mx-auto"
         >
-          <Send className="h-4 w-4" />
-        </button>
-      </form>
+          
+          <div className="flex items-center w-full bg-[#1e1f20] rounded-[32px] px-6 py-2.5 shadow-md relative group hover:bg-[#202124] transition duration-250">
+            {/* Input box */}
+            <input
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              placeholder="Zeptat se Gemini"
+              className="flex-1 text-[15px] text-zinc-100 placeholder-[#80868b] bg-transparent outline-none border-none py-2 w-full focus:ring-0 focus:outline-none"
+            />
+
+            {/* Controls right-aligned inside the pill */}
+            <div className="flex items-center gap-4 text-[#c4c7c5] shrink-0 font-sans">
+              <span className="text-xs bg-[#131314] hover:bg-[#2a2b2d] px-3 py-1 rounded-full text-zinc-400 border border-zinc-800 select-none cursor-pointer hidden sm:inline-flex items-center gap-1 font-medium">
+                Flash <span className="text-[10px] opacity-75">▼</span>
+              </span>
+              <button 
+                type="button"
+                className="hover:text-white transition p-1.5 rounded-full hover:bg-zinc-800/40 cursor-pointer" 
+                title="Hlasové zadávání"
+              >
+                <Mic className="h-5 w-5 text-zinc-400 hover:text-white" />
+              </button>
+              
+              <button
+                type="submit"
+                disabled={!inputText.trim() || isSending}
+                className={`p-2 rounded-full transition duration-200 shrink-0 ${
+                  inputText.trim() && !isSending
+                    ? "bg-[#4285F4] text-white hover:bg-[#357ae8]"
+                    : "text-zinc-600 cursor-not-allowed"
+                }`}
+                title="Odeslat zprávu"
+              >
+                <ArrowUp className="h-5 w-5 stroke-[2.5]" />
+              </button>
+            </div>
+          </div>
+
+          {/* Under input Gemini disclaimer banner */}
+          <p className="text-[11px] text-center text-[#80868b] mt-3 tracking-normal leading-normal font-sans select-none">
+            Gemini může dělat chyby. Ověřujte si proto důležité informace.{" "}
+            <a href="https://support.google.com/gemini" target="_blank" rel="noopener noreferrer" className="underline hover:text-zinc-400 transition ml-0.5">
+              Vaše soukromí a aplikace Gemini
+            </a>
+          </p>
+        </form>
+      </div>
 
     </div>
   );

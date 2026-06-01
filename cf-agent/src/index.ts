@@ -77,6 +77,7 @@ export default {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, X-Agent-Secret",
+      "Content-Security-Policy": "frame-ancestors *;",
     };
 
     // Handle preflight OPTIONS request

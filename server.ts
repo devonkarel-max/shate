@@ -45,6 +45,39 @@ function logError(title: string, error: unknown) {
   console.error(`[Server Error] ${title}:`, error instanceof Error ? error.message : error);
 }
 
+// Helper to wrap any promise in a strict timeout to avoid infinite hangs on gRPC / remote calls
+async function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timeoutId: NodeJS.Timeout;
+  const timeoutPromise = new Promise<T>((resolve) => {
+    timeoutId = setTimeout(() => {
+      console.warn(`[Timeout] Operation timed out after ${timeoutMs}ms.`);
+      resolve(fallback);
+    }, timeoutMs);
+  });
+  const result = await Promise.race([promise, timeoutPromise]);
+  clearTimeout(timeoutId);
+  return result;
+}
+
+// Safe Firestore builders to operate within safe limits and prevent blocking Nginx requests
+async function safeDbAdd(collectionName: string, data: any) {
+  try {
+    const promise = dbAdmin.collection(collectionName).add(data);
+    await runWithTimeout(promise, 2500, null);
+  } catch (err) {
+    console.error(`Failed to write to ${collectionName}:`, err);
+  }
+}
+
+async function safeDbSet(docRef: any, data: any) {
+  try {
+    const promise = docRef.set(data);
+    await runWithTimeout(promise, 2500, null);
+  } catch (err) {
+    console.error("Failed to set document:", err);
+  }
+}
+
 // ==================== API ENDPOINTS ====================
 
 // GET Check state & setup
@@ -68,7 +101,14 @@ app.get("/api/health", (req, res) => {
 app.post("/api/agent/pulse", async (req, res) => {
   try {
     const statusRef = dbAdmin.collection("settings").doc("agent_state");
-    const statusDoc = await statusRef.get();
+    const statusDoc = await runWithTimeout(
+      statusRef.get().catch(err => {
+        console.error("Firestore get status error:", err);
+        return { exists: false, data: () => null } as any;
+      }),
+      3400,
+      { exists: false, data: () => null } as any
+    );
 
     let statusData = {
       nextWakeup: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
@@ -86,22 +126,37 @@ app.post("/api/agent/pulse", async (req, res) => {
         };
       }
     } else {
-      await statusRef.set(statusData);
+      await safeDbSet(statusRef, statusData);
     }
 
     // Fetch existing goals, tasks, memories for contextual awareness
-    const goalsSnap = await dbAdmin.collection("goals").limit(5).get();
-    const tasksSnap = await dbAdmin.collection("tasks").where("status", "==", "pending").limit(5).get();
-    const memoriesSnap = await dbAdmin.collection("memories").orderBy("timestamp", "desc").limit(5).get();
+    const goalsPromise = dbAdmin.collection("goals").limit(5).get().catch(err => {
+      console.error("Firestore get goals error:", err);
+      return { docs: [] };
+    });
+    const tasksPromise = dbAdmin.collection("tasks").where("status", "==", "pending").limit(5).get().catch(err => {
+      console.error("Firestore get tasks error:", err);
+      return { docs: [] };
+    });
+    const memoriesPromise = dbAdmin.collection("memories").orderBy("timestamp", "desc").limit(5).get().catch(err => {
+      console.error("Firestore get memories error:", err);
+      return { docs: [] };
+    });
+
+    const [goalsSnap, tasksSnap, memoriesSnap] = await Promise.all([
+      runWithTimeout(goalsPromise, 3200, { docs: [] } as any),
+      runWithTimeout(tasksPromise, 3200, { docs: [] } as any),
+      runWithTimeout(memoriesPromise, 3200, { docs: [] } as any)
+    ]);
 
     const existingGoals: string[] = [];
-    goalsSnap.forEach((d) => existingGoals.push(d.data().title || ""));
+    goalsSnap.forEach((d: any) => existingGoals.push(d.data().title || ""));
 
     const existingTasks: string[] = [];
-    tasksSnap.forEach((d) => existingTasks.push(d.data().title || ""));
+    tasksSnap.forEach((d: any) => existingTasks.push(d.data().title || ""));
 
     const existingMemories: string[] = [];
-    memoriesSnap.forEach((d) => existingMemories.push(d.data().summary || ""));
+    memoriesSnap.forEach((d: any) => existingMemories.push(d.data().summary || ""));
 
     // Prepare prompt for Gemini
     const systemPrompt = `Jsi autonomní AI Agent se schopností sebe-reflexe, plánování a dlouhodobé paměti.
@@ -120,67 +175,94 @@ Výsledný formát musí být striktně validní JSON s definovanou strukturou. 
 
     const prompt = `Proveď hlubokou analýzu stávajícího stavu autonomního systému a navrhni další kroky a ponaučení.`;
 
-    const geminiRes = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-      config: {
-        systemInstruction: systemPrompt,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            mainStrategy: {
-              type: Type.STRING,
-              description: "Aktualizovaný hlavní myšlenkový směr pro další cyklus (jedna či dvě věty v češtině)",
-            },
-            newGoals: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: "Seznam nových strategických cílů (mohou být prázdné pokud stávající stačí)",
-            },
-            newTasks: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING },
-                  priority: { type: Type.STRING, enum: ["low", "medium", "high"] },
+    let geminiRes;
+    try {
+      geminiRes = await runWithTimeout(
+        ai.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents: prompt,
+          config: {
+            systemInstruction: systemPrompt,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                mainStrategy: {
+                  type: Type.STRING,
+                  description: "Aktualizovaný hlavní myšlenkový směr pro další cyklus (jedna či dvě věty v češtině)",
                 },
-                required: ["title", "priority"],
+                newGoals: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: "Seznam nových strategických cílů (mohou být prázdné pokud stávající stačí)",
+                },
+                newTasks: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      title: { type: Type.STRING },
+                      priority: { type: Type.STRING, enum: ["low", "medium", "high"] },
+                    },
+                    required: ["title", "priority"],
+                  },
+                  description: "Seznam nových úkolů k zařazení do backlogu",
+                },
+                newMemory: {
+                  type: Type.STRING,
+                  description: "Jedna strukturovaná věta vystihující klíčový poznatek (uloží se jako vzpomínka)",
+                },
+                memoryImportance: {
+                  type: Type.INTEGER,
+                  description: "Důležitost vzpomínky od 1 do 10",
+                },
+                memoryTags: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: "Tagy k uložení vzpomínky",
+                },
+                nextWakeupMinutes: {
+                  type: Type.INTEGER,
+                  description: "Doporučený čas do dalšího probuzení v minutách",
+                },
               },
-              description: "Seznam nových úkolů k zařazení do backlogu",
-            },
-            newMemory: {
-              type: Type.STRING,
-              description: "Jedna strukturovaná věta vystihující klíčový poznatek (uloží se jako vzpomínka)",
-            },
-            memoryImportance: {
-              type: Type.INTEGER,
-              description: "Důležitost vzpomínky od 1 do 10",
-            },
-            memoryTags: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: "Tagy k uložení vzpomínky",
-            },
-            nextWakeupMinutes: {
-              type: Type.INTEGER,
-              description: "Doporučený čas do dalšího probuzení v minutách",
+              required: ["mainStrategy", "newGoals", "newTasks", "newMemory", "memoryImportance", "memoryTags", "nextWakeupMinutes"],
             },
           },
-          required: ["mainStrategy", "newGoals", "newTasks", "newMemory", "memoryImportance", "memoryTags", "nextWakeupMinutes"],
-        },
-      },
-    });
+        }),
+        15000,
+        null
+      );
+    } catch (gErr: any) {
+      console.error("Gemini pulse content generation failed:", gErr);
+      const errStr = gErr instanceof Error ? gErr.message : String(gErr);
+      const isDenied = errStr.includes("denied access") || errStr.includes("PERMISSION_DENIED") || errStr.includes("403");
+      
+      const errMsg = isDenied
+        ? "Váš projekt na platformě Google AI Studio nemá povolen přístup k API (Permission Denied). Ujistěte se prosím, že máte platný Gemini API klíč. Lze jej vygenerovat nebo nastavit v postranním menu v sekci nastavení projektu (Settings > Secrets)."
+        : `Komunikace s AI selhala: ${errStr}`;
+        
+      return res.status(isDenied ? 403 : 500).json({
+        success: false,
+        error: errMsg
+      });
+    }
+
+    if (!geminiRes) {
+      return res.status(504).json({
+        success: false,
+        error: "Požadavek na AI model k provedení pulsu vypršel (Timeout)."
+      });
+    }
 
     const parsedResponse = JSON.parse(geminiRes.text || "{}");
     const timestamp = new Date().toISOString();
 
     // 1. Write new goals
     if (parsedResponse.newGoals && Array.isArray(parsedResponse.newGoals)) {
-      for (const title of parsedResponse.newGoals) {
-        await dbAdmin.collection("goals").add({
-          title,
+      for (const item of parsedResponse.newGoals) {
+        await safeDbAdd("goals", {
+          title: item,
           createdAt: timestamp,
           suggestedBy: "gemini",
         });
@@ -190,7 +272,7 @@ Výsledný formát musí být striktně validní JSON s definovanou strukturou. 
     // 2. Write new tasks
     if (parsedResponse.newTasks && Array.isArray(parsedResponse.newTasks)) {
       for (const t of parsedResponse.newTasks) {
-        await dbAdmin.collection("tasks").add({
+        await safeDbAdd("tasks", {
           title: t.title,
           priority: t.priority || "medium",
           status: "pending",
@@ -201,7 +283,7 @@ Výsledný formát musí být striktně validní JSON s definovanou strukturou. 
 
     // 3. Write new memory log
     if (parsedResponse.newMemory) {
-      await dbAdmin.collection("memories").add({
+      await safeDbAdd("memories", {
         summary: parsedResponse.newMemory,
         importance: typeof parsedResponse.memoryImportance === "number" ? parsedResponse.memoryImportance : 5,
         tags: parsedResponse.memoryTags || ["autonomous-cycle"],
@@ -219,7 +301,7 @@ Výsledný formát musí být striktně validní JSON s definovanou strukturou. 
       mainStrategy: parsedResponse.mainStrategy || "Běh dokončen, plánování aktivní.",
     };
 
-    await statusRef.set(updatedState);
+    await safeDbSet(statusRef, updatedState);
 
     return res.json({
       success: true,
@@ -260,13 +342,34 @@ Nikdy neuvažuj o fiktivních penězích, investičních rozpočtech či financ�
       };
     });
 
-    const geminiRes = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: formattedContents,
-      config: {
-        systemInstruction: systemPrompt,
-      },
-    });
+    let geminiRes;
+    try {
+      geminiRes = await runWithTimeout(
+        ai.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents: formattedContents,
+          config: {
+            systemInstruction: systemPrompt,
+          },
+        }),
+        15000,
+        null
+      );
+    } catch (gErr: any) {
+      console.error("Gemini chat content generation failed:", gErr);
+      const errStr = gErr instanceof Error ? gErr.message : String(gErr);
+      const isDenied = errStr.includes("denied access") || errStr.includes("PERMISSION_DENIED") || errStr.includes("403");
+      
+      const errMsg = isDenied
+        ? "Ahoj! Zdá se, že váš projekt v Google AI Studio nemá povolen přístup k API (Permission Denied). Ujistěte se prosím, že máte platný Gemini API klíč. Lze jej vygenerovat nebo nastavit v postranním menu v sekci nastavení projektu (Settings > Secrets)."
+        : `Chyba při komunikaci s AI: ${errStr}`;
+        
+      return res.status(isDenied ? 403 : 500).json({ error: errMsg });
+    }
+
+    if (!geminiRes) {
+      return res.status(504).json({ error: "Omlouvám se, ale požadavek na AI model vypršel (Timeout)." });
+    }
 
     return res.json({
       content: geminiRes.text || "Omlouvám se, ale nepodařilo se mi zformulovat odpověď.",
